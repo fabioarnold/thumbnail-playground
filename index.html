@@ -74,7 +74,7 @@
       let zoom = 1;
       const zoomFactor = 1.2;
       function zoomToPixel() {
-        return 100 * zoom;
+        return 200 * zoom;
       }
       function zoomIn() {
         zoom *= zoomFactor;
@@ -123,47 +123,88 @@
         drawClip(clip);
       }
 
+      function findNearestThumbnail(thumbnails, timestamp) {
+        // linear search to find the nearest thumbnail
+        let nearest = thumbnails[0];
+        let nearestDistance = Math.abs(timestamp - nearest.timestamp);
+        for (let i = 1; i < thumbnails.length; i++) {
+          const thumbnail = thumbnails[i];
+          const distance = Math.abs(timestamp - thumbnail.timestamp);
+          if (distance < nearestDistance) {
+            nearest = thumbnail;
+            nearestDistance = distance;
+          } else {
+            break;
+          }
+        }
+        return nearest;
+      }
+
       function drawClip(clip) {
+        const createThumbnailRequest = (startTime, frameTime, frameCount) => {
+          const thumbnails = [];
+          const request = {
+            thumbnails,
+            frameTime,
+            frameCount,
+            isComplete: false,
+          };
+          request.cancel = generateThumbnails(startTime, frameTime, frameCount, (imageData, i, timestamp) => {
+            createImageBitmap(imageData).then((image) => {
+              thumbnails[i] = {
+                timestamp,
+                image,
+              };
+              request.isComplete = thumbnails.length === frameCount;
+              drawClip(clip);
+            });
+          });
+          return request;
+        };
+
         const frameCount = Math.ceil(clip.getBoundingClientRect().width / 128);
         const frameTime = Number(clip.dataset.duration) / frameCount;
         const startTime = Number(clip.dataset.offset) + 0.5 * frameTime;
 
-        const createThumbnailRequest = (startTime, frameTime, frameCount) => {
-          const thumbnails = [];
-          const cancel = generateThumbnails(startTime, frameTime, frameCount, (imageData, i, timestamp) => {
-            createImageBitmap(imageData).then((imageBitmap) => {
-              thumbnails[i] = imageBitmap;
-              drawClip(clip);
-            });
-          });
-          return {
-            thumbnails,
-            frameTime,
-            frameCount,
-            cancel,
-          };
-        };
-
-        if (
-          !clip.thumbnailRequest ||
-          clip.thumbnailRequest.frameTime !== frameTime ||
-          clip.thumbnailRequest.frameCount !== frameCount
-        ) {
-          if (clip.thumbnailRequest) {
-            clip.thumbnailRequest.cancel();
-          }
+        if (!clip.thumbnailRequest) {
           clip.thumbnailRequest = createThumbnailRequest(startTime, frameTime, frameCount);
         }
-        const thumbnailCount = clip.thumbnailRequest.thumbnails.length;
-        if (thumbnailCount > 0) {
+        const request = clip.thumbnailRequest;
+        const isValid = request.frameTime === frameTime || request.frameCount === frameCount;
+        // Wait for the request in flight to complete before creating a new one
+        // TODO: Should we cancel immediately?
+        if (request.isComplete && !isValid) {
+          clip.oldThumbnails = request.thumbnails;
+          clip.thumbnailRequest = createThumbnailRequest(startTime, frameTime, frameCount);
+        }
+
+        const thumbnails = request.thumbnails;
+        if (thumbnails.length > 0 || clip.oldThumbnails) {
           clip.canvas.height = 72 * devicePixelRatio;
           const clipCtx = clip.canvas.getContext("2d");
           clipCtx.resetTransform();
           clipCtx.scale(devicePixelRatio, devicePixelRatio);
           let frame = Math.floor(clip.canvas.offsetX / 128);
           for (let x = -clip.canvas.offsetX % 128; x < clip.canvas.width; x += 128, frame++) {
-            const thumbnail = clip.thumbnailRequest.thumbnails[Math.min(frame, thumbnailCount - 1)];
-            clipCtx.drawImage(thumbnail, x, 0, thumbnail.width / devicePixelRatio, thumbnail.height / devicePixelRatio);
+            const timestamp = startTime + frame * frameTime;
+            let image;
+            if (isValid) {
+              if (frame < thumbnails.length || !clip.oldThumbnails) {
+                image = thumbnails[Math.min(frame, thumbnails.length - 1)].image;
+              } else {
+                image = findNearestThumbnail(clip.oldThumbnails, timestamp).image;
+              }
+            } else {
+              let nearest = findNearestThumbnail(thumbnails, timestamp);
+              if (clip.oldThumbnails) {
+                const oldThumbnail = findNearestThumbnail(clip.oldThumbnails, timestamp);
+                if (Math.abs(timestamp - oldThumbnail.timestamp) < Math.abs(timestamp - nearest.timestamp)) {
+                  nearest = oldThumbnail;
+                }
+              }
+              image = nearest.image;
+            }
+            clipCtx.drawImage(image, x, 0, image.width / devicePixelRatio, image.height / devicePixelRatio);
           }
         }
       }
@@ -190,7 +231,7 @@
           drawScene(tmpCtx, timestamp);
           const imageData = tmpCtx.getImageData(0, 0, tmpCanvas.width, tmpCanvas.height);
           onFrame(imageData, i, timestamp);
-          setTimeout(() => drawFrame(i + 1), 100);
+          setTimeout(() => drawFrame(i + 1), 17);
         };
         drawFrame(0);
 
