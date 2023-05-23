@@ -1,0 +1,232 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Thumbnail Playground</title>
+    <style>
+      body {
+        margin: 0;
+        font-family: sans-serif;
+        text-align: center;
+      }
+      #seeker {
+        width: calc(100vw - 20px);
+      }
+      #timeline {
+        margin: 10px;
+        width: calc(100vw - 20px);
+        height: 120px;
+        background-color: #eee;
+        text-align: left;
+        overflow-x: auto;
+        white-space: nowrap;
+        border: 1px solid #ccc;
+      }
+      div.clip {
+        display: inline-block;
+        margin: 10px;
+        height: 72px;
+        background-color: #ccc;
+        border: 1px solid #aaa;
+        box-sizing: content-box;
+        overflow: hidden;
+      }
+      div.clip canvas {
+        height: 72px;
+        position: relative;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="main"></canvas>
+    <input id="seeker" type="range" step="any" max="15" />
+    <div id="timeline">
+      <div class="clip" data-offset="0" data-duration="10"></div>
+      <div class="clip" data-offset="10" data-duration="5"></div>
+    </div>
+    <button onclick="zoomOut()">&minus;</button>
+    <button onclick="zoomIn()">&plus;</button>
+    <span>Zoom: </span>
+    <span id="zoom">100 %</span>
+    <script>
+      const mainCanvas = document.querySelector("canvas#main");
+      const seeker = document.querySelector("input#seeker");
+      const timeline = document.querySelector("div#timeline");
+      const clips = document.querySelectorAll("div.clip");
+      const zoomLabel = document.querySelector("span#zoom");
+
+      // init main canvas
+      mainCanvas.width = 1280 * devicePixelRatio;
+      mainCanvas.height = 720 * devicePixelRatio;
+      mainCanvas.style.width = "1280px";
+      mainCanvas.style.height = "720px";
+      function drawMainCanvas() {
+        const timestamp = seeker.valueAsNumber;
+        const ctx = mainCanvas.getContext("2d");
+        ctx.resetTransform();
+        ctx.scale(10 * devicePixelRatio, 10 * devicePixelRatio);
+        drawScene(ctx, timestamp);
+      }
+      drawMainCanvas();
+      seeker.oninput = drawMainCanvas;
+
+      let zoom = 1;
+      const zoomFactor = 1.2;
+      function zoomToPixel() {
+        return 100 * zoom;
+      }
+      function zoomIn() {
+        zoom *= zoomFactor;
+        updateAllClips();
+        const width = timeline.getBoundingClientRect().width;
+        timeline.scrollLeft = (timeline.scrollLeft + width / 2) * zoomFactor - width / 2;
+        zoomLabel.textContent = `${Math.round(zoom * 100)} %`;
+      }
+      function zoomOut() {
+        zoom /= zoomFactor;
+        const width = timeline.getBoundingClientRect().width;
+        let scrollCenter = timeline.scrollLeft + width / 2;
+        scrollCenter /= zoomFactor;
+        const scrollMax = timeline.scrollWidth / zoomFactor - width;
+        timeline.scrollLeft = Math.max(0, Math.min(scrollCenter - width / 2, scrollMax));
+        updateAllClips();
+        zoomLabel.textContent = `${Math.round(zoom * 100)} %`;
+      }
+
+      // init clips
+      clips.forEach((clip, index) => {
+        clip.canvas = document.createElement("canvas");
+        clip.appendChild(clip.canvas);
+      });
+      function updateAllClips() {
+        clips.forEach((clip) => {
+          clip.style.width = `${Number(clip.dataset.duration) * zoomToPixel()}px`;
+          updateClipCanvas(clip);
+        });
+      }
+      updateAllClips();
+      timeline.addEventListener("scroll", updateAllClips);
+      window.addEventListener("resize", updateAllClips);
+
+      // updates clip layout and draws the clip
+      function updateClipCanvas(clip) {
+        const timelineRect = timeline.getBoundingClientRect();
+        const clipRect = clip.getBoundingClientRect();
+        if (!areRectsOverlapping(timelineRect, clipRect)) {
+          return; // invisible
+        }
+        clip.canvas.offsetX = Math.max(0, timelineRect.left - clipRect.left);
+        clip.canvas.style.transform = `translateX(${clip.canvas.offsetX}px)`;
+        // maximum width of a canvas is 32,767 pixels
+        clip.canvas.width = timelineRect.width * devicePixelRatio;
+        drawClip(clip);
+      }
+
+      function drawClip(clip) {
+        const frameCount = Math.ceil(clip.getBoundingClientRect().width / 128);
+        const frameTime = Number(clip.dataset.duration) / frameCount;
+        const startTime = Number(clip.dataset.offset) + 0.5 * frameTime;
+
+        const createThumbnailRequest = (startTime, frameTime, frameCount) => {
+          const thumbnails = [];
+          const cancel = generateThumbnails(startTime, frameTime, frameCount, (imageData, i, timestamp) => {
+            createImageBitmap(imageData).then((imageBitmap) => {
+              thumbnails[i] = imageBitmap;
+              drawClip(clip);
+            });
+          });
+          return {
+            thumbnails,
+            frameTime,
+            frameCount,
+            cancel,
+          };
+        };
+
+        if (
+          !clip.thumbnailRequest ||
+          clip.thumbnailRequest.frameTime !== frameTime ||
+          clip.thumbnailRequest.frameCount !== frameCount
+        ) {
+          if (clip.thumbnailRequest) {
+            clip.thumbnailRequest.cancel();
+          }
+          clip.thumbnailRequest = createThumbnailRequest(startTime, frameTime, frameCount);
+        }
+        const thumbnailCount = clip.thumbnailRequest.thumbnails.length;
+        if (thumbnailCount > 0) {
+          clip.canvas.height = 72 * devicePixelRatio;
+          const clipCtx = clip.canvas.getContext("2d");
+          clipCtx.resetTransform();
+          clipCtx.scale(devicePixelRatio, devicePixelRatio);
+          let frame = Math.floor(clip.canvas.offsetX / 128);
+          for (let x = -clip.canvas.offsetX % 128; x < clip.canvas.width; x += 128, frame++) {
+            const thumbnail = clip.thumbnailRequest.thumbnails[Math.min(frame, thumbnailCount - 1)];
+            clipCtx.drawImage(thumbnail, x, 0, thumbnail.width / devicePixelRatio, thumbnail.height / devicePixelRatio);
+          }
+        }
+      }
+
+      function areRectsOverlapping(a, b) {
+        return a.left < b.right && a.right > b.left && a.top < b.bottom && a.bottom > b.top;
+      }
+
+      function generateThumbnails(startTime, frameTime, frameCount, onFrame) {
+        const tmpCanvas = document.createElement("canvas");
+        tmpCanvas.width = 128 * devicePixelRatio;
+        tmpCanvas.height = 72 * devicePixelRatio;
+        const tmpCtx = tmpCanvas.getContext("2d");
+        tmpCtx.scale(devicePixelRatio, devicePixelRatio);
+
+        let cancelled = false;
+        const cancel = () => (cancelled = true);
+
+        const drawFrame = (i) => {
+          if (i >= frameCount || cancelled) {
+            return;
+          }
+          const timestamp = startTime + i * frameTime;
+          drawScene(tmpCtx, timestamp);
+          const imageData = tmpCtx.getImageData(0, 0, tmpCanvas.width, tmpCanvas.height);
+          onFrame(imageData, i, timestamp);
+          setTimeout(() => drawFrame(i + 1), 100);
+        };
+        drawFrame(0);
+
+        return cancel;
+      }
+
+      function drawScene(ctx, time) {
+        ctx.font = "40px sans-serif";
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+        ctx.fillStyle = `hsl(${(time * 24) % 360}, 60%, 40%)`;
+        ctx.fillRect(0, 0, 128, 72);
+        ctx.strokeStyle = "white";
+        ctx.lineWidth = 4;
+        ctx.strokeRect(2, 2, 128 - 4, 72 - 4);
+        ctx.fillStyle = "white";
+        ctx.fillText(`${time.toFixed(2)}`, 64, 36);
+      }
+
+      function generateImageData(ctx, w, h, t) {
+        const imageData = ctx.createImageData(w, h);
+
+        for (let i = 0; i < imageData.data.length; i += 4) {
+          // Percentage in the x direction, times 255
+          let x = ((i % (4 * w)) / (4 * w)) * 255;
+          // Percentage in the y direction, times 255
+          let y = (Math.ceil(i / (4 * w)) / h) * 255;
+
+          // Modify pixel data
+          imageData.data[i + 0] = x; // R value
+          imageData.data[i + 1] = y; // G value
+          imageData.data[i + 2] = 255 - x; // B value
+          imageData.data[i + 3] = 255; // A value
+        }
+        return imageData;
+      }
+    </script>
+  </body>
+</html>
